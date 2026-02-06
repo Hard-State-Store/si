@@ -1,150 +1,198 @@
-import pygame
-import sys
+import tkinter as tk
 import random
+import math
 from settings import *
-from sprites import *
+from sprites import Entity, Player, Trash, Polluter, Bin, Vendor, Tree, Wall
 
 class Game:
     def __init__(self):
-        pygame.init()
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption(TITLE)
-        self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("Arial", 20)
-        
-        # Sprite Groups
-        self.all_sprites = pygame.sprite.Group()
-        self.obstacles = pygame.sprite.Group()
-        self.trash_group = pygame.sprite.Group()
-        self.polluters = pygame.sprite.Group()
-        self.interactables = pygame.sprite.Group() 
-        self.trees = pygame.sprite.Group()
-        
-        self.setup()
+        self.root = tk.Tk()
+        self.root.title(TITLE)
+        self.root.geometry(f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+        self.root.resizable(False, False)
 
-    def setup(self):
-        # Create Player
-        self.player = Player([self.all_sprites], self.obstacles)
-        
-        # Create Bin
-        self.bin = Bin((100, 100), [self.all_sprites, self.obstacles, self.interactables])
-        
-        # Create Vendor
-        self.vendor = Vendor((900, 100), [self.all_sprites, self.obstacles, self.interactables])
-        
-        # Create Initial Polluters
-        for _ in range(3):
-            pos = (random.randint(0, SCREEN_WIDTH), random.randint(0, SCREEN_HEIGHT))
-            Polluter(pos, [self.all_sprites, self.polluters], self.obstacles)
+        self.canvas = tk.Canvas(self.root, width=SCREEN_WIDTH, height=SCREEN_HEIGHT, bg=WHITE)
+        self.canvas.pack()
 
-    def run(self):
-        while True:
-            dt = self.clock.tick(FPS) / 1000.0
-            self.events()
-            self.update(dt)
-            self.draw()
+        self.setup_game()
+        self.setup_ui()
+        self.setup_input()
+        
+        self.game_over = False
+        self.update_loop()
+        self.root.mainloop()
 
-    def events(self):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-                
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_f:
-                    self.handle_interaction()
+    def setup_game(self):
+        self.player = Player(self.canvas)
+        self.bin = Bin(self.canvas, 100, 100)
+        self.vendor = Vendor(self.canvas, 900, 100)
+        
+        self.trash_list = []
+        self.polluters = []
+        self.trees = []
+        self.walls = []
+        
+        self.create_map()
+        for _ in range(5):
+            self.spawn_polluter()
             
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1: # Left Click
-                    self.handle_attack()
-
-    def handle_interaction(self):
-        # 1. Try to pickup trash
-        # Check collision with trash (using a slightly larger rect for reach)
-        # Simple distance check is often better
-        closest_trash = None
-        min_dist = 50 # Interaction range
+    def setup_ui(self):
+        self.ui_money = self.canvas.create_text(10, 10, anchor="nw", text="", font=("Arial", 14, "bold"))
+        self.ui_inv = self.canvas.create_text(10, 35, anchor="nw", text="", font=("Arial", 14, "bold"))
+        self.ui_health = self.canvas.create_text(10, 60, anchor="nw", text="", font=("Arial", 14, "bold"), fill="red")
         
-        for trash in self.trash_group:
-            dist = pygame.math.Vector2(self.player.rect.center).distance_to(trash.rect.center)
-            if dist < min_dist:
-                closest_trash = trash
-                min_dist = dist
-        
-        if closest_trash:
-            closest_trash.kill()
-            self.player.trash_inventory += 1
-            return # Action taken
+        help_text = "WASD: Move | E: Interact (Pickup/Bin) | F: Shop/Plant | Click: Attack"
+        self.ui_help = self.canvas.create_text(10, SCREEN_HEIGHT - 30, anchor="nw", text=help_text, font=("Arial", 12))
 
-        # 2. Try to interact with Bin
-        dist_to_bin = pygame.math.Vector2(self.player.rect.center).distance_to(self.bin.rect.center)
-        if dist_to_bin < 60:
+    def setup_input(self):
+        # We bind to <KeyPress> and <KeyRelease> globally to capture WASD regardless of active widget
+        self.root.bind_all("<KeyPress>", self.on_key_press)
+        self.root.bind_all("<KeyRelease>", self.on_key_release)
+        self.canvas.bind("<Button-1>", self.handle_attack)
+        
+        self.keys = {'w': False, 's': False, 'a': False, 'd': False}
+
+    def on_key_press(self, event):
+        # Normalize keysym to lowercase to handle CapsLock
+        key = event.keysym.lower()
+        if key in self.keys:
+            self.keys[key] = True
+        elif key == 'f':
+            self.handle_f_action()
+        elif key == 'e':
+            self.handle_e_action()
+
+    def on_key_release(self, event):
+        key = event.keysym.lower()
+        if key in self.keys:
+            self.keys[key] = False
+
+    def create_map(self):
+        self.walls.append(Wall(self.canvas, 400, 300, 200, 150))
+        self.walls.append(Wall(self.canvas, 700, 50, 150, 200))
+        self.walls.append(Wall(self.canvas, 100, 500, 200, 100))
+
+    def spawn_polluter(self):
+        for _ in range(10):
+            x = random.randint(0, SCREEN_WIDTH - 30)
+            y = random.randint(0, SCREEN_HEIGHT - 30)
+            valid = True
+            for w in self.walls:
+                if w.check_collision_rect(x, x+30, y, y+30):
+                    valid = False; break
+            if valid:
+                self.polluters.append(Polluter(self.canvas, x, y))
+                break
+
+    def handle_e_action(self):
+        if self.game_over: return
+        # Pickup
+        if self.player.trash_inventory < MAX_INVENTORY:
+            closest = None
+            min_dist = 50
+            for t in self.trash_list:
+                dist = self.player.distance_to(t)
+                if dist < min_dist:
+                    closest = t; min_dist = dist
+            
+            if closest:
+                closest.delete()
+                self.trash_list.remove(closest)
+                self.player.trash_inventory += 1
+                return
+
+        # Deposit
+        if self.player.distance_to(self.bin) < 80:
             if self.player.trash_inventory > 0:
-                reward = self.player.trash_inventory * TRASH_VALUE
-                self.player.money += reward
-                self.player.xp += self.player.trash_inventory # 1 XP per trash
+                self.player.money += self.player.trash_inventory * TRASH_VALUE
+                self.player.xp += self.player.trash_inventory
                 self.player.trash_inventory = 0
-            return
 
-        # 3. Try to interact with Vendor
-        dist_to_vendor = pygame.math.Vector2(self.player.rect.center).distance_to(self.vendor.rect.center)
-        if dist_to_vendor < 60:
+    def handle_f_action(self):
+        if self.game_over: return
+        # Vendor
+        if self.player.distance_to(self.vendor) < 80:
             if self.player.money >= SEED_COST:
                 self.player.money -= SEED_COST
                 self.player.has_seeds += 1
-            return
+                return
 
-        # 4. Try to plant tree
+        # Plant
         if self.player.has_seeds > 0:
-            # Check if space is empty (simplified check)
-            pos = self.player.rect.center
-            Tree(pos, [self.all_sprites, self.trees, self.obstacles])
-            self.player.has_seeds -= 1
+            collides = False
+            for w in self.walls:
+                 if w.check_collision_rect(self.player.x, self.player.x+20, self.player.y, self.player.y+40):
+                     collides = True
+            if not collides:
+                self.trees.append(Tree(self.canvas, self.player.x, self.player.y))
+                self.player.has_seeds -= 1
 
-    def handle_attack(self):
-        # Attack logic - remove polluters in range
-        attack_range = 60
-        for polluter in self.polluters:
-            dist = pygame.math.Vector2(self.player.rect.center).distance_to(polluter.rect.center)
-            if dist < attack_range:
-                polluter.kill()
-                self.player.xp += 5 # XP reward for stopping polluter
-
-    def update(self, dt):
-        self.all_sprites.update(dt)
+    def handle_attack(self, event):
+        if self.game_over: return
+        px, py = self.player.get_center()
+        mx, my = event.x, event.y
+        slash = self.canvas.create_line(px, py, mx, my, fill="yellow", width=5)
+        self.root.after(100, lambda: self.canvas.delete(slash))
         
-        # Polluters spawn trash randomly
-        for polluter in self.polluters:
-            if random.random() < 0.01: # 1% chance per frame per polluter (approx once every 1.5s at 60fps)
-                if len(self.trash_group) < 50: # Limit max trash
-                    Trash(polluter.rect.topleft, [self.all_sprites, self.trash_group])
+        limit = 100
+        to_remove = []
+        for p in self.polluters:
+            if self.player.distance_to(p) < limit:
+                p.delete()
+                to_remove.append(p)
+                self.player.xp += 5
+        for p in to_remove: self.polluters.remove(p)
 
-        # Spawn new polluters if all gone (optional, keep game going)
-        if len(self.polluters) == 0:
-             if random.random() < 0.005:
-                 pos = (random.randint(0, SCREEN_WIDTH), random.randint(0, SCREEN_HEIGHT))
-                 Polluter(pos, [self.all_sprites, self.polluters], self.obstacles)
+    def update_loop(self):
+        if self.game_over: return
 
-    def draw(self):
-        self.screen.fill(WHITE)
-        self.all_sprites.draw(self.screen)
-        self.draw_ui()
-        pygame.display.flip()
-
-    def draw_ui(self):
-        # Simple HUD
-        ui_texts = [
-            f"Money: ${self.player.money}",
-            f"XP: {self.player.xp}",
-            f"Trash: {self.player.trash_inventory}",
-            f"Seeds: {self.player.has_seeds}",
-            "WASD: Move | F: Interact/Plant | Click: Attack"
-        ]
+        # Player Move
+        dx, dy = 0, 0
+        if self.keys['w']: dy = -1
+        if self.keys['s']: dy = 1
+        if self.keys['a']: dx = -1
+        if self.keys['d']: dx = 1
         
-        for i, text in enumerate(ui_texts):
-            surface = self.font.render(text, True, BLACK)
-            self.screen.blit(surface, (10, 10 + i * 25))
+        if dx!=0 and dy!=0: dx*=0.707; dy*=0.707
+        self.player.move(dx, dy, self.walls)
+        
+        # Polluters
+        for p in self.polluters:
+            p.update(self.walls)
+            if random.random() < 0.005 and len(self.trash_list) < 50:
+                 tx, ty = p.x, p.y
+                 free = True
+                 for w in self.walls:
+                     if w.check_collision_rect(tx, tx+16, ty, ty+16): free = False
+                 if free: self.trash_list.append(Trash(self.canvas, tx, ty))
 
-if __name__ == '__main__':
-    game = Game()
-    game.run()
+            # Damage check
+            if p.attack_cooldown == 0 and self.player.distance_to(p) < 40:
+                self.player.health -= ENEMY_DAMAGE
+                p.attack_cooldown = ENEMY_DAMAGE_COOLDOWN
+                self.canvas.itemconfig(self.player.id, fill="red" if not self.player.image else "") 
+                # Note: if image is used, fill config might not work or just be ignored, 
+                # to flash image we would need screen flash or something, but this is fine.
+                if not self.player.image:
+                    self.root.after(100, lambda: self.canvas.itemconfig(self.player.id, fill=GREEN))
+                
+                if self.player.health <= 0:
+                    self.game_over_screen()
+                    return
+
+        # Pop
+        if len(self.polluters) < 5 and random.random() < 0.005: self.spawn_polluter()
+            
+        # UI
+        self.canvas.itemconfig(self.ui_money, text=f"Money: ${self.player.money}")
+        self.canvas.itemconfig(self.ui_inv, text=f"Bag: {self.player.trash_inventory}/{MAX_INVENTORY} | Seeds: {self.player.has_seeds}")
+        self.canvas.itemconfig(self.ui_health, text=f"Health: {self.player.health}/{PLAYER_MAX_HEALTH}")
+
+        self.root.after(16, self.update_loop)
+
+    def game_over_screen(self):
+        self.game_over = True
+        self.canvas.create_text(SCREEN_WIDTH//2, SCREEN_HEIGHT//2, text="GAME OVER", font=("Arial", 40, "bold"), fill="red")
+
+if __name__ == "__main__":
+    Game()
